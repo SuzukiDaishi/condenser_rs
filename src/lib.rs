@@ -1,12 +1,25 @@
 use nih_plug::prelude::*;
 use std::sync::Arc;
 
+mod condenser;
+use condenser::Condenser;
+
+const TH_DB: f32 = -40.0;
+const DRY_WET: f32 = 0.5;
+const FADE_MS: f32 = 10.0;
+const REL_MS: f32 = 50.0;
+const RING_SEC: usize = 60;
+const WARMUP_S: f32 = 0.3;
+const LOOP_MODE: bool = false;
+
 // This is a shortened version of the gain example with most comments removed, check out
 // https://github.com/robbert-vdh/nih-plug/blob/master/plugins/examples/gain/src/lib.rs to get
 // started
 
 struct CondenserRs {
     params: Arc<CondenserRsParams>,
+    fx_l: Option<Condenser>,
+    fx_r: Option<Condenser>,
 }
 
 #[derive(Params)]
@@ -23,6 +36,8 @@ impl Default for CondenserRs {
     fn default() -> Self {
         Self {
             params: Arc::new(CondenserRsParams::default()),
+            fx_l: None,
+            fx_r: None,
         }
     }
 }
@@ -102,18 +117,58 @@ impl Plugin for CondenserRs {
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        // Resize buffers and perform other potentially expensive initialization operations here.
-        // The `reset()` function is always called right after this function. You can remove this
-        // function if you do not need it.
+        let fs = buffer_config.sample_rate as usize;
+        self.fx_l = Some(Condenser::new(
+            fs,
+            TH_DB,
+            DRY_WET,
+            FADE_MS,
+            REL_MS,
+            RING_SEC,
+            WARMUP_S,
+            LOOP_MODE,
+        ));
+        self.fx_r = Some(Condenser::new(
+            fs,
+            TH_DB,
+            DRY_WET,
+            FADE_MS,
+            REL_MS,
+            RING_SEC,
+            WARMUP_S,
+            LOOP_MODE,
+        ));
         true
     }
 
     fn reset(&mut self) {
-        // Reset buffers and envelopes here. This can be called from the audio thread and may not
-        // allocate. You can remove this function if you do not need it.
+        if let Some(fx) = &mut self.fx_l {
+            *fx = Condenser::new(
+                fx.fs,
+                TH_DB,
+                DRY_WET,
+                FADE_MS,
+                REL_MS,
+                RING_SEC,
+                WARMUP_S,
+                LOOP_MODE,
+            );
+        }
+        if let Some(fx) = &mut self.fx_r {
+            *fx = Condenser::new(
+                fx.fs,
+                TH_DB,
+                DRY_WET,
+                FADE_MS,
+                REL_MS,
+                RING_SEC,
+                WARMUP_S,
+                LOOP_MODE,
+            );
+        }
     }
 
     fn process(
@@ -122,15 +177,17 @@ impl Plugin for CondenserRs {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        for channel_samples in buffer.iter_samples() {
-            // Smoothing is optionally built into the parameters themselves
-            let gain = self.params.gain.smoothed.next();
-
-            for sample in channel_samples {
-                *sample *= gain;
+        let channels = buffer.as_slice();
+        if let Some(fx) = &mut self.fx_l {
+            if let Some(ch) = channels.get_mut(0) {
+                fx.process_inplace(*ch);
             }
         }
-
+        if let Some(fx) = &mut self.fx_r {
+            if let Some(ch) = channels.get_mut(1) {
+                fx.process_inplace(*ch);
+            }
+        }
         ProcessStatus::Normal
     }
 }
