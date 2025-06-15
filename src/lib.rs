@@ -8,7 +8,7 @@ const TH_DB: f32 = -40.0;
 const DRY_WET: f32 = 0.5;
 const FADE_MS: f32 = 10.0;
 const REL_MS: f32 = 50.0;
-const RING_SEC: usize = 60;
+const RING_SEC: i32 = 60;
 const WARMUP_S: f32 = 0.3;
 const LOOP_MODE: bool = false;
 
@@ -24,12 +24,26 @@ struct CondenserRs {
 
 #[derive(Params)]
 struct CondenserRsParams {
-    /// The parameter's ID is used to identify the parameter in the wrappred plugin API. As long as
-    /// these IDs remain constant, you can rename and reorder these fields as you wish. The
-    /// parameters are exposed to the host in the same order they were defined. In this case, this
-    /// gain parameter is stored as linear gain while the values are displayed in decibels.
-    #[id = "gain"]
-    pub gain: FloatParam,
+    #[id = "threshold_db"]
+    pub threshold_db: FloatParam,
+
+    #[id = "dry_wet"]
+    pub dry_wet: FloatParam,
+
+    #[id = "fade_ms"]
+    pub fade_ms: FloatParam,
+
+    #[id = "rel_ms"]
+    pub rel_ms: FloatParam,
+
+    #[id = "ring_sec"]
+    pub ring_sec: IntParam,
+
+    #[id = "warmup_s"]
+    pub warmup_s: FloatParam,
+
+    #[id = "loop_mode"]
+    pub loop_mode: BoolParam,
 }
 
 impl Default for CondenserRs {
@@ -45,29 +59,56 @@ impl Default for CondenserRs {
 impl Default for CondenserRsParams {
     fn default() -> Self {
         Self {
-            // This gain is stored as linear gain. NIH-plug comes with useful conversion functions
-            // to treat these kinds of parameters as if we were dealing with decibels. Storing this
-            // as decibels is easier to work with, but requires a conversion for every sample.
-            gain: FloatParam::new(
-                "Gain",
-                util::db_to_gain(0.0),
-                FloatRange::Skewed {
-                    min: util::db_to_gain(-30.0),
-                    max: util::db_to_gain(30.0),
-                    // This makes the range appear as if it was linear when displaying the values as
-                    // decibels
-                    factor: FloatRange::gain_skew_factor(-30.0, 30.0),
+            threshold_db: FloatParam::new(
+                "Threshold",
+                TH_DB,
+                FloatRange::Linear {
+                    min: -80.0,
+                    max: 0.0,
                 },
             )
-            // Because the gain parameter is stored as linear gain instead of storing the value as
-            // decibels, we need logarithmic smoothing
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
-            // There are many predefined formatters we can use here. If the gain was stored as
-            // decibels instead of as a linear gain value, we could have also used the
-            // `.with_step_size(0.1)` function to get internal rounding.
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_unit(" dB"),
+
+            dry_wet: FloatParam::new(
+                "Dry/Wet",
+                DRY_WET,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+
+            fade_ms: FloatParam::new(
+                "Fade",
+                FADE_MS,
+                FloatRange::Linear {
+                    min: 1.0,
+                    max: 100.0,
+                },
+            )
+            .with_unit(" ms"),
+
+            rel_ms: FloatParam::new(
+                "Release",
+                REL_MS,
+                FloatRange::Linear {
+                    min: 1.0,
+                    max: 1000.0,
+                },
+            )
+            .with_unit(" ms"),
+
+            ring_sec: IntParam::new(
+                "Loop Length",
+                RING_SEC,
+                IntRange::Linear { min: 1, max: 120 },
+            ),
+
+            warmup_s: FloatParam::new(
+                "Warmup",
+                WARMUP_S,
+                FloatRange::Linear { min: 0.0, max: 5.0 },
+            )
+            .with_unit(" s"),
+
+            loop_mode: BoolParam::new("Loop Mode", LOOP_MODE),
         }
     }
 }
@@ -95,7 +136,6 @@ impl Plugin for CondenserRs {
         names: PortNames::const_default(),
     }];
 
-
     const MIDI_INPUT: MidiConfig = MidiConfig::None;
     const MIDI_OUTPUT: MidiConfig = MidiConfig::None;
 
@@ -121,52 +161,54 @@ impl Plugin for CondenserRs {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         let fs = buffer_config.sample_rate as usize;
+        let p = &self.params;
         self.fx_l = Some(Condenser::new(
             fs,
-            TH_DB,
-            DRY_WET,
-            FADE_MS,
-            REL_MS,
-            RING_SEC,
-            WARMUP_S,
-            LOOP_MODE,
+            p.threshold_db.value(),
+            p.dry_wet.value(),
+            p.fade_ms.value(),
+            p.rel_ms.value(),
+            p.ring_sec.value() as usize,
+            p.warmup_s.value(),
+            p.loop_mode.value(),
         ));
         self.fx_r = Some(Condenser::new(
             fs,
-            TH_DB,
-            DRY_WET,
-            FADE_MS,
-            REL_MS,
-            RING_SEC,
-            WARMUP_S,
-            LOOP_MODE,
+            p.threshold_db.value(),
+            p.dry_wet.value(),
+            p.fade_ms.value(),
+            p.rel_ms.value(),
+            p.ring_sec.value() as usize,
+            p.warmup_s.value(),
+            p.loop_mode.value(),
         ));
         true
     }
 
     fn reset(&mut self) {
+        let p = &self.params;
         if let Some(fx) = &mut self.fx_l {
             *fx = Condenser::new(
                 fx.fs,
-                TH_DB,
-                DRY_WET,
-                FADE_MS,
-                REL_MS,
-                RING_SEC,
-                WARMUP_S,
-                LOOP_MODE,
+                p.threshold_db.value(),
+                p.dry_wet.value(),
+                p.fade_ms.value(),
+                p.rel_ms.value(),
+                p.ring_sec.value() as usize,
+                p.warmup_s.value(),
+                p.loop_mode.value(),
             );
         }
         if let Some(fx) = &mut self.fx_r {
             *fx = Condenser::new(
                 fx.fs,
-                TH_DB,
-                DRY_WET,
-                FADE_MS,
-                REL_MS,
-                RING_SEC,
-                WARMUP_S,
-                LOOP_MODE,
+                p.threshold_db.value(),
+                p.dry_wet.value(),
+                p.fade_ms.value(),
+                p.rel_ms.value(),
+                p.ring_sec.value() as usize,
+                p.warmup_s.value(),
+                p.loop_mode.value(),
             );
         }
     }
@@ -178,12 +220,29 @@ impl Plugin for CondenserRs {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let channels = buffer.as_slice();
+        let p = &self.params;
         if let Some(fx) = &mut self.fx_l {
+            fx.set_threshold_db(p.threshold_db.value());
+            fx.set_dry_wet(p.dry_wet.value());
+            fx.set_fade_ms(p.fade_ms.value());
+            fx.set_rel_ms(p.rel_ms.value());
+            fx.set_ring_sec(p.ring_sec.value() as usize);
+            fx.set_warmup_sec(p.warmup_s.value());
+            fx.set_loop_mode(p.loop_mode.value());
+
             if let Some(ch) = channels.get_mut(0) {
                 fx.process_inplace(*ch);
             }
         }
         if let Some(fx) = &mut self.fx_r {
+            fx.set_threshold_db(p.threshold_db.value());
+            fx.set_dry_wet(p.dry_wet.value());
+            fx.set_fade_ms(p.fade_ms.value());
+            fx.set_rel_ms(p.rel_ms.value());
+            fx.set_ring_sec(p.ring_sec.value() as usize);
+            fx.set_warmup_sec(p.warmup_s.value());
+            fx.set_loop_mode(p.loop_mode.value());
+
             if let Some(ch) = channels.get_mut(1) {
                 fx.process_inplace(*ch);
             }

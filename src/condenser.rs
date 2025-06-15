@@ -75,8 +75,51 @@ impl Condenser {
         }
     }
 
+    pub fn set_threshold_db(&mut self, threshold_db: f32) {
+        self.th_lin = 10f32.powf(threshold_db / 20.0);
+    }
+
+    pub fn set_dry_wet(&mut self, dry_wet: f32) {
+        self.dry_wet = dry_wet.clamp(0.0, 1.0);
+    }
+
+    pub fn set_fade_ms(&mut self, fade_ms: f32) {
+        let fade_len = ((fade_ms * 1e-3 * self.fs as f32) as usize).max(1);
+        if fade_len != self.fade_len {
+            self.fade_len = fade_len;
+            self.fade_curve = (0..fade_len)
+                .map(|t| 0.5 - 0.5 * (2.0 * PI * t as f32 / (fade_len as f32 - 1.0)).cos())
+                .collect();
+        }
+    }
+
+    pub fn set_rel_ms(&mut self, rel_ms: f32) {
+        self.rel_coef = (-1.0 / (rel_ms * 1e-3 * self.fs as f32)).exp();
+    }
+
+    pub fn set_warmup_sec(&mut self, warmup_sec: f32) {
+        self.warmup_frames = (warmup_sec * self.fs as f32) as usize;
+    }
+
+    pub fn set_loop_mode(&mut self, loop_mode: bool) {
+        self.loop_mode = loop_mode;
+    }
+
+    pub fn set_ring_sec(&mut self, seconds: usize) {
+        let new_frames = self.fs * seconds;
+        if new_frames != self.max_frames {
+            self.max_frames = new_frames;
+            self.buf = vec![0.0; self.max_frames];
+            self.write_ptr = 0;
+            self.read_ptr = 0;
+            self.recorded_frames = 0;
+        }
+    }
+
     fn ring_write(&mut self, data: &[f32]) {
-        if self.loop_mode { return; }
+        if self.loop_mode {
+            return;
+        }
         let n = data.len();
         let end = self.write_ptr + n;
         if end <= self.max_frames {
@@ -84,7 +127,7 @@ impl Condenser {
         } else {
             let first = self.max_frames - self.write_ptr;
             self.buf[self.write_ptr..].copy_from_slice(&data[..first]);
-            self.buf[..n-first].copy_from_slice(&data[first..]);
+            self.buf[..n - first].copy_from_slice(&data[first..]);
         }
         self.write_ptr = end % self.max_frames;
         self.recorded_frames = self.recorded_frames.max(end).min(self.max_frames);
@@ -101,7 +144,7 @@ impl Condenser {
             out = self.buf[self.read_ptr..end].to_vec();
         } else {
             let first = loop_len - self.read_ptr;
-            out = [&self.buf[self.read_ptr..loop_len], &self.buf[..n-first]].concat();
+            out = [&self.buf[self.read_ptr..loop_len], &self.buf[..n - first]].concat();
         }
         self.read_ptr = (self.read_ptr + n) % loop_len;
         out
@@ -132,8 +175,12 @@ impl Condenser {
             let remain = n_total - idx;
             let seg = &block[idx..idx + remain];
 
-            let peak = seg.iter().fold(0.0f32, |a,&b| a.max(b.abs()));
-            self.env = if peak > self.env { peak } else { self.env * self.rel_coef.powi(remain as i32) };
+            let peak = seg.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+            self.env = if peak > self.env {
+                peak
+            } else {
+                self.env * self.rel_coef.powi(remain as i32)
+            };
 
             match self.state {
                 State::Idle => {
@@ -217,27 +264,27 @@ mod tests {
     #[test]
     fn ring_write_read() {
         let mut c = Condenser::new(10, -10.0, 1.0, 1.0, 1.0, 2, 0.0, false);
-        c.ring_write(&[1.0,2.0,3.0]);
-        assert_eq!(c.ring_read(3), vec![1.0,2.0,3.0]);
+        c.ring_write(&[1.0, 2.0, 3.0]);
+        assert_eq!(c.ring_read(3), vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
     fn loop_mode_playback() {
         let mut c = Condenser::new(10, -10.0, 1.0, 1.0, 1.0, 2, 0.0, true);
-        c.buf[..3].copy_from_slice(&[1.0,2.0,3.0]);
+        c.buf[..3].copy_from_slice(&[1.0, 2.0, 3.0]);
         c.recorded_frames = 3;
-        let mut data = [0.0,0.0,0.0,0.0];
+        let mut data = [0.0, 0.0, 0.0, 0.0];
         c.process_inplace(&mut data);
-        assert_eq!(data.to_vec(), vec![1.0,2.0,3.0,1.0]);
+        assert_eq!(data.to_vec(), vec![1.0, 2.0, 3.0, 1.0]);
     }
 
     #[test]
     fn ring_wraparound() {
         let mut c = Condenser::new(4, -10.0, 1.0, 1.0, 1.0, 1, 0.0, false);
-        c.ring_write(&[1.0,2.0,3.0,4.0]);
-        assert_eq!(c.ring_read(2), vec![1.0,2.0]);
-        c.ring_write(&[5.0,6.0]);
-        assert_eq!(c.ring_read(4), vec![3.0,4.0,5.0,6.0]);
+        c.ring_write(&[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(c.ring_read(2), vec![1.0, 2.0]);
+        c.ring_write(&[5.0, 6.0]);
+        assert_eq!(c.ring_read(4), vec![3.0, 4.0, 5.0, 6.0]);
     }
 
     #[test]
@@ -257,23 +304,22 @@ mod tests {
     #[test]
     fn dry_wet_mix() {
         let mut c = Condenser::new(10, -10.0, 0.5, 1.0, 1.0, 2, 0.0, true);
-        c.buf[..3].copy_from_slice(&[1.0,1.0,1.0]);
+        c.buf[..3].copy_from_slice(&[1.0, 1.0, 1.0]);
         c.recorded_frames = 3;
-        let mut data = [0.0,0.0,0.0];
+        let mut data = [0.0, 0.0, 0.0];
         c.process_inplace(&mut data);
-        assert_eq!(data.to_vec(), vec![0.5,0.5,0.5]);
+        assert_eq!(data.to_vec(), vec![0.5, 0.5, 0.5]);
     }
 
     #[test]
     fn warmup_skip() {
         let mut c = Condenser::new(10, -60.0, 1.0, 3.0, 1.0, 10, 0.2, false);
-        let mut pre = [1.0,1.0];
+        let mut pre = [1.0, 1.0];
         c.process_inplace(&mut pre);
         assert_eq!(c.recorded_frames, 0);
 
-        let mut post = [1.0,1.0];
+        let mut post = [1.0, 1.0];
         c.process_inplace(&mut post);
         assert!(c.recorded_frames > 0);
     }
 }
-
